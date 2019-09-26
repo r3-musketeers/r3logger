@@ -32,6 +32,7 @@ func NewMockState() *MockState {
 // InstallReceivedState ...
 func (m *MockState) InstallReceivedState(newState []byte) error {
 	// TODO: ...
+
 	fmt.Println("Received State:", newState)
 	return nil
 }

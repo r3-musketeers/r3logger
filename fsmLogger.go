@@ -2,28 +2,34 @@ package main
 
 import (
 	"io"
-	"strconv"
-	"strings"
+	"sync/atomic"
 
+	"r3logger/pb"
+
+	"github.com/golang/protobuf/proto"
 	"github.com/hashicorp/raft"
 )
 
 // Must implement the Raft FSM interface, even if the chatRoom application
 // won't do any procedure after successfully applys by consensus protocol
-type fsm Server
+type fsm Scribe
 
 // Apply proposes a new value to the consensus cluster
 func (s *fsm) Apply(l *raft.Log) interface{} {
 
-	// Using a string slice to concatenate strings in O(n) complexity
-	auxBuffer := []string{strconv.FormatUint(l.Index, 10), string(l.Data)}
-
-	// Broadcast a message to every other client on the room
-	for _, client := range s.clients {
-		client.outgoing <- strings.Join(auxBuffer, "-")
+	command := &pb.Command{}
+	err := proto.Unmarshal(l.Data, command)
+	if err != nil {
+		return err
 	}
+	command.Id = l.Index
+	serializedCmd, _ := proto.Marshal(command)
+	_, err = s.LogFile.Write(serializedCmd)
 
-	return nil
+	if s.monit {
+		atomic.AddUint64(&s.req, 1)
+	}
+	return err
 }
 
 // Restore stores the key-value store to a previous state.

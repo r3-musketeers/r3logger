@@ -1,0 +1,24 @@
+syntax = "proto3";
+package pb;
+
+service Logger {
+
+	rpc Subscribe (SubRequest) returns (Response);
+	rpc Unsubscribe (UnsubRequest) returns (Response);
+
+	rpc Log (stream LogEntry) returns (Response);
+	rpc Retrive (StateRequest) returns (stream LogEntry);	
+	rpc Truncate (LogInterval) returns (Response);
+}
+
+message SubRequest {}
+
+message UnsubRequest {}
+
+message LogEntry {}
+
+message StateRequest {}
+
+message LogInterval {}
+
+message Response {}

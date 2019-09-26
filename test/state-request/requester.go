@@ -29,7 +29,6 @@ func init() {
 func main() {
 	flag.Parse()
 
-	//validIP := net.ParseIP(recovAddr) != nil
 	validIP := recovAddr != ""
 	if !validIP {
 		log.Fatalln("Must set a valid IP address to request state, run with: ./recovery -recov 'ipAddress'")
