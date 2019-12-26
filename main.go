@@ -60,9 +60,7 @@ func main() {
 	terminate := make(chan os.Signal, 1)
 	signal.Notify(terminate, os.Interrupt)
 	<-terminate
-
-	// TODO: ...
-
+	GetLogger().Shutdown()
 }
 
 func initStaticConfig() {

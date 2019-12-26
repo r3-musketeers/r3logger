@@ -9,45 +9,129 @@ import (
 	"log"
 	"net"
 	"os"
-	"r3logger/pb"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/hashicorp/raft"
 )
+
+// Custom configuration over default for testing
+func configRaft() *raft.Config {
+	config := raft.DefaultConfig()
+	config.SnapshotInterval = 24 * time.Hour
+	config.SnapshotThreshold = 2 << 62
+	config.LogLevel = "WARN"
+	return config
+}
 
 // Scribe ...
 type Scribe struct {
-	LogFile  io.Writer
-	req      uint64
-	incoming chan pb.Command
-	cancel   context.CancelFunc
+	LogFile io.Writer
+	raft    *raft.Raft
+
+	req    uint64
+	cancel context.CancelFunc
 }
 
 // NewScribe ...
-func NewScribe(uniqueID string) *Scribe {
+func NewScribe(id, recov string) *Scribe {
 
-	l, err := createStateLog(uniqueID)
+	l, err := createStateLog(id)
 	if err != nil {
 		log.Fatalln("could not init log file: ", err.Error())
 	}
 
 	ctx, c := context.WithCancel(context.Background())
 	s := &Scribe{
-		LogFile:  l,
-		req:      0,
-		incoming: make(chan pb.Command, 0),
-		cancel:   c,
+		LogFile: l,
+		req:     0,
+		cancel:  c,
 	}
 
 	if !httpAPI {
-		go s.ListenStateTransfer(ctx, recovAddr)
+		go s.ListenStateTransfer(ctx, recov)
 	}
 
 	if monitoringThroughtput {
 		go s.monitor(ctx)
 	}
 	return s
+}
+
+// StartRaft ...
+func (s *Scribe) StartRaft(localID, raftAddr string) error {
+
+	// Setup Raft configuration.
+	config := configRaft()
+	config.LocalID = raft.ServerID(localID)
+
+	// Setup Raft communication.
+	addr, err := net.ResolveTCPAddr("tcp", raftAddr)
+	if err != nil {
+		return err
+	}
+	transport, err := raft.NewTCPTransport(raftAddr, addr, 3, 10*time.Second, os.Stderr)
+	if err != nil {
+		return err
+	}
+
+	logStore := raft.NewInmemStore()
+	stableStore := raft.NewInmemStore()
+
+	// Create a fake snapshot store
+	dir := "checkpoints/" + localID
+	snapshots, err := raft.NewFileSnapshotStore(dir, 2, os.Stderr)
+	if err != nil {
+		return err
+	}
+
+	// Instantiate the Raft systems.
+	ra, err := raft.NewRaft(config, (*fsm)(s), logStore, stableStore, snapshots, transport)
+	if err != nil {
+		return fmt.Errorf("new raft: %s", err)
+	}
+	s.raft = ra
+	return nil
+}
+
+// ListenStateTransfer ...
+func (s *Scribe) ListenStateTransfer(c context.Context, addr string) {
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("failed to bind connection at %s: %s", addr, err.Error())
+	}
+
+	for {
+		select {
+		case <-c.Done():
+			return
+
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Fatalf("accept failed: %s", err.Error())
+			}
+			defer conn.Close()
+
+			request, _ := bufio.NewReader(conn).ReadString('\n')
+
+			data := strings.Split(request, "-")
+			if len(data) != 2 {
+				log.Fatalf("incorrect state request, got: %s", data)
+			}
+
+			data[1] = strings.TrimSuffix(data[1], "\n")
+			requestedLogIndex, _ := strconv.Atoi(data[1])
+
+			err = s.UnsafeStateRecover(uint64(requestedLogIndex), conn)
+			if err != nil {
+				log.Fatalf("failed to transfer log to node located at %s: %s", data[0], err.Error())
+			}
+		}
+	}
 }
 
 func (s *Scribe) monitor(c context.Context) {
@@ -87,46 +171,10 @@ func (s *Scribe) UnsafeStateRecover(logIndex uint64, activePipe net.Conn) error 
 	return <-signalError
 }
 
-// ListenStateTransfer ...
-func (s *Scribe) ListenStateTransfer(c context.Context, addr string) {
-
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("failed to bind connection at %s: %s", addr, err.Error())
-	}
-
-	for {
-		select {
-		case <-c.Done():
-			return
-
-		default:
-			conn, err := listener.Accept()
-			if err != nil {
-				log.Fatalf("accept failed: %s", err.Error())
-			}
-
-			request, _ := bufio.NewReader(conn).ReadString('\n')
-
-			data := strings.Split(request, "-")
-			if len(data) != 2 {
-				log.Fatalf("incorrect state request, got: %s", data)
-			}
-
-			data[1] = strings.TrimSuffix(data[1], "\n")
-			requestedLogIndex, _ := strconv.Atoi(data[1])
-
-			err = s.UnsafeStateRecover(uint64(requestedLogIndex), conn)
-			if err != nil {
-				log.Fatalf("failed to transfer log to node located at %s: %s", data[0], err.Error())
-			}
-
-			err = conn.Close()
-			if err != nil {
-				log.Fatalf("Error encountered on connection close: %s", err.Error())
-			}
-		}
-	}
+// Stop ...
+func (s *Scribe) Stop() {
+	s.cancel()
+	s.raft.Shutdown()
 }
 
 // readAll is a slightly derivation of 'ioutil.ReadFile()'. It skips the file descriptor creation
