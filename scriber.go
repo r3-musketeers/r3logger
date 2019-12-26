@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -17,49 +18,49 @@ import (
 
 // Scribe ...
 type Scribe struct {
-	LogFile *os.File
-
-	monit bool
-	req   uint64
-
+	LogFile  io.Writer
+	req      uint64
 	incoming chan pb.Command
+	cancel   context.CancelFunc
 }
 
 // NewScribe ...
 func NewScribe(uniqueID string) *Scribe {
 
+	l, err := createStateLog(uniqueID)
+	if err != nil {
+		log.Fatalln("could not init log file: ", err.Error())
+	}
+
+	ctx, c := context.WithCancel(context.Background())
 	s := &Scribe{
-		req: 0,
+		LogFile:  l,
+		req:      0,
+		incoming: make(chan pb.Command, 0),
+		cancel:   c,
 	}
 
-	var flags int
-	logFileName := *logfolder + "log-file-" + uniqueID + ".txt"
-	if catastrophicFaults {
-		flags = os.O_SYNC | os.O_WRONLY
-	} else {
-		flags = os.O_WRONLY
-	}
-
-	if _, exists := os.Stat(logFileName); exists == nil {
-		s.LogFile, _ = os.OpenFile(logFileName, flags, 0644)
-	} else if os.IsNotExist(exists) {
-		s.LogFile, _ = os.OpenFile(logFileName, os.O_CREATE|flags, 0644)
-	} else {
-		log.Fatalln("Could not create log file:", exists.Error())
+	if !httpAPI {
+		go s.ListenStateTransfer(ctx, recovAddr)
 	}
 
 	if monitoringThroughtput {
-		s.monit = true
-		go s.monitor()
+		go s.monitor(ctx)
 	}
 	return s
 }
 
-func (s *Scribe) monitor() {
+func (s *Scribe) monitor(c context.Context) {
 	for {
-		time.Sleep(1 * time.Second)
-		cont := atomic.SwapUint64(&s.req, 0)
-		fmt.Println(cont)
+		select {
+		case <-c.Done():
+			return
+
+		default:
+			time.Sleep(1 * time.Second)
+			cont := atomic.SwapUint64(&s.req, 0)
+			fmt.Println(cont)
+		}
 	}
 }
 
@@ -87,15 +88,19 @@ func (s *Scribe) UnsafeStateRecover(logIndex uint64, activePipe net.Conn) error 
 }
 
 // ListenStateTransfer ...
-func (s *Scribe) ListenStateTransfer(addr string) {
+func (s *Scribe) ListenStateTransfer(c context.Context, addr string) {
 
-	go func() {
-		listener, err := net.Listen("tcp", addr)
-		if err != nil {
-			log.Fatalf("failed to bind connection at %s: %s", addr, err.Error())
-		}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("failed to bind connection at %s: %s", addr, err.Error())
+	}
 
-		for {
+	for {
+		select {
+		case <-c.Done():
+			return
+
+		default:
 			conn, err := listener.Accept()
 			if err != nil {
 				log.Fatalf("accept failed: %s", err.Error())
@@ -121,7 +126,7 @@ func (s *Scribe) ListenStateTransfer(addr string) {
 				log.Fatalf("Error encountered on connection close: %s", err.Error())
 			}
 		}
-	}()
+	}
 }
 
 // readAll is a slightly derivation of 'ioutil.ReadFile()'. It skips the file descriptor creation
@@ -166,4 +171,25 @@ func readAll(fileDescriptor *os.File) ([]byte, error) {
 		_, err = buf.ReadFrom(r)
 		return buf.Bytes(), err
 	}(fileDescriptor, n)
+}
+
+func createStateLog(id string) (io.Writer, error) {
+	var flags int
+	var w io.Writer
+
+	logFileName := *logfolder + "log-file-" + id + ".txt"
+	if catastrophicFaults {
+		flags = os.O_SYNC | os.O_WRONLY
+	} else {
+		flags = os.O_WRONLY
+	}
+
+	if _, exists := os.Stat(logFileName); exists == nil {
+		w, _ = os.OpenFile(logFileName, flags, 0644)
+	} else if os.IsNotExist(exists) {
+		w, _ = os.OpenFile(logFileName, os.O_CREATE|flags, 0644)
+	} else {
+		return nil, exists
+	}
+	return w, nil
 }

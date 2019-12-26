@@ -26,7 +26,7 @@ func (s *fsm) Apply(l *raft.Log) interface{} {
 	serializedCmd, _ := proto.Marshal(command)
 	_, err = s.LogFile.Write(serializedCmd)
 
-	if s.monit {
+	if monitoringThroughtput {
 		atomic.AddUint64(&s.req, 1)
 	}
 	return err
